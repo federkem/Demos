@@ -2,7 +2,7 @@
 
 ## Canvas
 
-* [3D Torus](https://federkem.github.io/Demos/Canvas/Demo - Canvas - 3D Torus.html)
+* [3D Torus](https://federkem.github.io/Demos/Canvas/Demo%20-%20Canvas%20-%203D%20Torus.html)
 
 ## WebGL
 
