@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8">
+		<title>Mandelbrot WebGL Example (Syntopia 2012)</title>
+		<link rel="canonical" href="https://gist.github.com/LMLB/4242936fe79fb9de803c20d1196db8f3">
+		<script id="shader-fs" type="x-shader/x-fragment">
+			// Go for highest precision available
+			precision highp float;
+
+			varying vec2 coord;
+			uniform vec2 pixelSize;
+			uniform float time;
+
+			// Mandelbrot coords
+			uniform vec2 center;
+			uniform vec2 centerD;
+			uniform float zoom;
+
+			// Julia coords
+			uniform vec2 center2;
+			uniform float zoom2;
+
+			// Color parameters
+			float R = 0.0;
+			float G = 0.43;
+			float B = 1.0;
+			float Divider = 23.0;
+			float Power = 1.2;
+			float Radius = 0.7037;
+
+			float times_frc( float a, float b ) {
+				return mix( 0.0, a * b, b != 0.0 ? 1.0 : 0.0 );
+			}
+
+			float plus_frc( float a, float b ) {
+				return mix( a, a + b, b != 0.0 ? 1.0 : 0.0 );
+			}
+
+			float minus_frc( float a, float b ) {
+				return mix( a, a - b, b != 0.0 ? 1.0 : 0.0 );
+			}
+
+			// Double emulation based on GLSL Mandelbrot Shader by Henry Thasler (www.thasler.org/blog)
+			//
+			// Emulation based on Fortran-90 double-single package. See http://crd.lbl.gov/~dhbailey/mpdist/
+			// Add: res = ds_add( a, b ) => res = a + b
+			vec2 add( vec2 dsa, vec2 dsb ) {
+				vec2 dsc;
+				float e;
+				float t1;
+				float t2;
+
+				t1 = plus_frc( dsa.x, dsb.x );
+				e = minus_frc( t1, dsa.x );
+				t2 = plus_frc( plus_frc( plus_frc( minus_frc( dsb.x, e ), minus_frc( dsa.x, minus_frc( t1, e ) ) ), dsa.y ), dsb.y );
+
+				dsc.x = plus_frc( t1, t2 );
+				dsc.y = minus_frc( t2, minus_frc( dsc.x, t1 ) );
+				return dsc;
+			}
+
+			// Substract: res = ds_sub( a, b ) => res = a - b
+			vec2 sub( vec2 dsa, vec2 dsb ) {
+				vec2 dsc;
+				float e;
+				float t1;
+				float t2;
+
+				t1 = minus_frc( dsa.x, dsb.x );
+				e = minus_frc( t1, dsa.x );
+				t2 = minus_frc( plus_frc( plus_frc( minus_frc( minus_frc( 0.0, dsb.x ), e ), minus_frc( dsa.x, minus_frc( t1, e ) ) ), dsa.y ), dsb.y );
+
+				dsc.x = plus_frc( t1, t2 );
+				dsc.y = minus_frc( t2, minus_frc( dsc.x, t1 ) );
+				return dsc;
+			}
+
+			// Compare: res = -1 if a <  b
+			//              =  0 if a == b
+			//              =  1 if a >  b
+			float cmp( vec2 dsa, vec2 dsb ) {
+				if ( dsa.x < dsb.x ) {
+					return -1.0;
+				}
+				if ( dsa.x > dsb.x ) {
+					return 1.0;
+				}
+				if ( dsa.y < dsb.y ) {
+					return -1.0;
+				}
+				if ( dsa.y > dsb.y ) {
+					return 1.0;
+				}
+				return 0.9;
+			}
+
+			// Multiply: res = ds_mul( a, b ) => res = a * b
+			vec2 mul( vec2 dsa, vec2 dsb ) {
+				vec2 dsc;
+				float c11;
+				float c21;
+				float c2;
+				float e;
+				float t1;
+				float t2;
+				float a1;
+				float a2;
+				float b1;
+				float b2;
+				float cona;
+				float conb;
+				float split = 8193.0;
+
+				cona = times_frc( dsa.x, split );
+				conb = times_frc( dsb.x, split );
+				a1 = minus_frc( cona, minus_frc( cona, dsa.x ) );
+				b1 = minus_frc( conb, minus_frc( conb, dsb.x ) );
+				a2 = minus_frc( dsa.x, a1 );
+				b2 = minus_frc( dsb.x, b1 );
+
+				c11 = times_frc( dsa.x, dsb.x );
+				c21 = plus_frc( times_frc( a2, b2 ), plus_frc( times_frc( a2, b1 ), plus_frc( times_frc( a1, b2 ), minus_frc( times_frc( a1, b1 ), c11 ) ) ) );
+
+				c2 = plus_frc( times_frc( dsa.x, dsb.y ), times_frc( dsa.y, dsb.x ) );
+
+				t1 = plus_frc( c11, c2 );
+				e = minus_frc( t1, c11 );
+				t2 = plus_frc( plus_frc( times_frc( dsa.y, dsb.y ), plus_frc( minus_frc( c2, e ), minus_frc( c11, minus_frc( t1, e ) ) ) ), c21 );
+
+				dsc.x = plus_frc( t1, t2 );
+				dsc.y = minus_frc( t2, minus_frc( dsc.x, t1 ) );
+				return dsc;
+			}
+
+			// create double-single number from float
+			vec2 set( float a ) {
+				return vec2( a, 0.0 );
+			}
+
+			float rand( vec2 co ) {
+				// implementation found at: lumina.sourceforge.net/Tutorials/Noise.html
+				return fract( sin( dot( co.xy , vec2( 12.9898, 78.233 ) ) ) * 43758.5453 );
+			}
+
+			vec2 complexMul( vec2 a, vec2 b ) {
+				return vec2( a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x );
+			}
+
+			// double complex multiplication
+			vec4 dcMul( vec4 a, vec4 b ) {
+				return vec4(
+					sub( mul( a.xy, b.xy ), mul( a.zw, b.zw ) ),
+					add( mul( a.xy, b.zw ), mul( a.zw, b.xy ) )
+				);
+			}
+
+			vec4 dcAdd( vec4 a, vec4 b ) {
+				return vec4( add( a.xy, b.xy ), add( a.zw, b.zw ) );
+			}
+
+			// Length of double complex
+			vec2 dcLength( vec4 a ) {
+				return add( mul( a.xy, a.xy ), mul( a.zw, a.zw ) );
+			}
+
+			vec4 dcSet( vec2 a ) {
+				return vec4( a.x, 0., a.y, 0.0 );
+			}
+
+			vec4 dcSet( vec2 a, vec2 ad ) {
+				return vec4( a.x, ad.x, a.y, ad.y );
+			}
+
+			// Multiply double-complex with double
+			vec4 dcMul( vec4 a, vec2 b ) {
+				return vec4( mul( a.xy, b ), mul( a.wz, b ) );
+			}
+
+			vec3 colorSinglePrecision( vec2 p, float falloff ) {
+
+				vec2 c = p * zoom + center;
+
+				vec2 z = vec2( 0.0, 0.0 );
+
+				int j = ITERATIONS;
+				for ( int i = 0; i <= ITERATIONS; i++ ) {
+					if ( length( z ) > 1000.0 ) {
+						break;
+					}
+					z = complexMul( z, z ) + c;
+					j = i;
+				}
+				float dotZZ = dot( z, z );
+
+				if ( j < ITERATIONS ) {
+					// The color scheme here is based on one
+					// from the Mandelbrot in Inigo Quilez�s Shader Toy:
+					float co = float( j ) + 1.0 - log2( 0.5 * log2( dotZZ ) );
+					co = sqrt( max( 0.0, co ) / 256.0 );
+					co += rand( coord * fract( time ) ) * 0.02;
+					return falloff * vec3(
+						0.5 + 0.5 * cos( 6.2831 * co + R ),
+						0.5 + 0.5 * cos( 6.2831 * co + G ),
+						0.5 + 0.5 * cos( 6.2831 * co + B )
+					);
+				} else {
+					// Inside
+					return vec3( 0.05, 0.01, 0.02 );
+				}
+			}
+
+			vec3 colorDoublePrecision( vec2 p, float falloff ) {
+
+				vec4 c = dcAdd( dcMul( dcSet( p ), vec2( zoom, 0.0 ) ), dcSet( center, centerD ) );
+
+				vec4 dZ = dcSet( vec2( 0.0, 0.0 ) );
+				vec4 add = c;
+
+				int j = ITERATIONS;
+				for ( int i = 0; i <= ITERATIONS; i++ ) {
+					if ( cmp( dcLength( dZ ), set( 1000.0 ) ) > 0.0 ) {
+						break;
+					}
+					dZ = dcAdd( dcMul( dZ, dZ ), add );
+					j = i;
+				}
+				float dotZZ = dZ.x * dZ.x + dZ.z * dZ.z; // extract high part
+
+				if ( j < ITERATIONS ) {
+					// The color scheme here is based on one
+					// from the Mandelbrot in Inigo Quilez�s Shader Toy:
+					float co = float( j ) + 1.0 - log2( 0.5 * log2( dotZZ ) );
+					co = sqrt( max( 0.0, co ) / 256.0 );
+					co += rand( coord * fract( time ) ) * 0.02;
+					return falloff * vec3(
+						0.5 + 0.5 * cos( 6.2831 * co + R ),
+						0.5 + 0.5 * cos( 6.2831 * co + G ),
+						0.5 + 0.5 * cos( 6.2831 * co + B )
+					);
+				} else {
+					// Inside
+					return vec3( 0.05, 0.01, 0.02 );
+				}
+			}
+
+			// Splits in single and double precision halves
+			vec3 colorSplit( vec2 cor ) {
+				// round corners
+				vec2 c = 1.0 - ( 10.0 - 10.0 * abs( vec2( cor.x < 0.0 ? cor.x * 2.0 + 1.0 : cor.x * 2.0 - 1.0, cor.y ) ) );
+				if ( abs( cor.x ) > 0.5 && c.y > 0.0 && c.x > 0.0 && dot( c, c ) > 1.0 ) {
+					return vec3( 1.0 );
+				}
+
+				float split = ( smoothstep( 0.0, 1.0, ( cor.y * 0.5 ) + 0.5 ) - 0.5 ) * 0.1;
+				if ( cor.x - split < 0.0 ) {
+					vec2 c = vec2( cor.x * 2.0 + 1.0, cor.y );
+					vec2 p = c * zoom + center;
+					float falloff = exp( -dot( c, c ) / ( 1.0 + 0.2 * rand( cor ) ) );
+					return colorSinglePrecision( c, falloff );
+				} else {
+					vec2 c = vec2( cor.x * 2.0 - 1.0, cor.y );
+					float falloff = exp( -dot( c, c ) / ( 1.0 + 0.2 * rand( cor ) ) );
+					vec2 p = c * zoom2 + center2;
+					return ( colorDoublePrecision( c, falloff ) ).bgr;
+				}
+			}
+
+			void main() {
+				vec3 v = vec3( 0.0, 0.0, 0.0 );
+				float d = 1.0 / float( ANTIALIAS );
+				vec2 ard = vec2( pixelSize.x, pixelSize.y ) * d;
+				for ( int x = 0; x < ANTIALIAS; x++ ) {
+					for ( int y = 0; y < ANTIALIAS; y++ ) {
+						v += colorSplit( coord + vec2( x, y ) * ard );
+					}
+				}
+				gl_FragColor = vec4( pow( v / float( ANTIALIAS * ANTIALIAS ), vec3( 1.0 / 2.2 ) ), 1.0 );
+			}
+		</script>
+		<script id="shader-vs" type="x-shader/x-vertex">
+			attribute vec3 position;
+			varying vec2 coord;
+
+			void main( void ) {
+				coord = position.xy;
+				gl_Position = vec4( position, 1.0 );
+			}
+		</script>
+		<script type="text/javascript">
+
+			Math.fround = Math.fround || ( function ( array ) {
+				return function( x ) {
+					return array[ 0 ] = x, array[ 0 ];
+				};
+			} )( Float32Array( 1 ) );
+
+			window.requestAnimationFrame = window.requestAnimationFrame || ( function requestAnimationFrameIIFE1() {
+				"use strict";
+				window.requestAnimationFrame = window.msRequestAnimationFrame ||
+					window.mozRequestAnimationFrame ||
+					window.webkitRequestAnimationFrame ||
+					( function requestAnimationFrameInner() {
+						var fps = 60;
+						var delay = 1000 / fps;
+						var animationStartTime = Date.now();
+						var previousCallTime = animationStartTime;
+
+						return function requestAnimationFrame( callback ) {
+							var requestTime = Date.now();
+							var timeout = Math.max( 0, delay - ( requestTime - previousCallTime ) );
+							var timeToCall = requestTime + timeout;
+
+							previousCallTime = timeToCall;
+
+							return window.setTimeout( function onAnimationFrame() {
+								callback( timeToCall - animationStartTime );
+							}, timeout );
+						};
+					} )();
+
+				window.cancelAnimationFrame = window.mozCancelAnimationFrame ||
+					window.webkitCancelAnimationFrame ||
+					window.cancelRequestAnimationFrame ||
+					window.msCancelRequestAnimationFrame ||
+					window.mozCancelRequestAnimationFrame ||
+					window.webkitCancelRequestAnimationFrame ||
+					function cancelAnimationFrame( id ) {
+						window.clearTimeout( id );
+					};
+			} )();
+
+			var gl;
+
+			var Iterations = 200;
+			var AA = 1;
+
+			// Some functions used from: https://developer.mozilla.org/en/WebGL/Adding_2D_content_to_a_WebGL_context
+			function getShader( id ) {
+				'use strict';
+				var shaderScript = document.getElementById( id );
+				if ( ! shaderScript ) {
+					return null;
+				}
+
+				var source = '';
+
+				// 'shaderScript' is a HTMLScriptElement.
+				// We must extract the text node.
+				var currentChild = shaderScript.firstChild;
+				while ( currentChild ) {
+					if ( currentChild.nodeType === currentChild.TEXT_NODE ) {
+						source += currentChild.textContent;
+					}
+					currentChild = currentChild.nextSibling;
+				}
+
+				var shader;
+				if ( shaderScript.type === 'x-shader/x-fragment' ) {
+					shader = gl.createShader( gl.FRAGMENT_SHADER );
+				} else if ( shaderScript.type === 'x-shader/x-vertex' ) {
+					shader = gl.createShader( gl.VERTEX_SHADER );
+				} else {
+					return null;
+				}
+
+				// Constants that are passed by 'preprocessing'
+				source = '#define ITERATIONS ' + Iterations + '\n'
+					+ '#define ANTIALIAS ' + AA + '\n'
+					+ source;
+
+				gl.shaderSource( shader, source );
+				gl.compileShader( shader );
+
+				if ( ! gl.getShaderParameter( shader, gl.COMPILE_STATUS ) ) {
+					alert( gl.getShaderInfoLog( shader ) );
+					return null;
+				}
+
+				return shader;
+			}
+
+			var dirty = true; // indicates that we need to refresh the canvas
+
+			// The main loop. We will only draw when requested to do so.
+			// 'requestAnimationFrame' will only be called when the browser finds it appropriate.
+			var lastAnimateTime = null;
+			function animate( time ) {
+				'use strict';
+				if ( lastAnimateTime === null ) {
+					lastAnimateTime = time;
+				}
+				var deltaTime = time - lastAnimateTime;
+				lastAnimateTime = time;
+				requestAnimationFrame( animate );
+				checkKeys( deltaTime );
+				if ( dirty ) {
+					draw();
+					dirty = false;
+				}
+			}
+
+			var shaderProgram;
+
+			// Load and compile.
+			function initShaders() {
+				'use strict';
+				var fragmentShader = getShader( 'shader-fs' );
+				var vertexShader = getShader( 'shader-vs' );
+
+				shaderProgram = gl.createProgram();
+				gl.attachShader( shaderProgram, vertexShader );
+				gl.attachShader( shaderProgram, fragmentShader );
+				gl.linkProgram( shaderProgram );
+
+				if ( ! gl.getProgramParameter( shaderProgram, gl.LINK_STATUS ) ) {
+					alert( 'Could not initialise shaders' );
+				}
+
+				gl.useProgram( shaderProgram );
+				shaderProgram.vertexPositionAttribute = gl.getAttribLocation( shaderProgram, 'position' );
+				gl.enableVertexAttribArray( shaderProgram.vertexPositionAttribute );
+
+				// To debug HLSL code. Requires recent chromium build and --enable-privileged-webgl-extensions
+				// if ( gl.getExtension( 'WEBGL_debug_shaders' ) ) {
+				//	document.getElementById( 'src' ).innerHTML = gl.getExtension( 'WEBGL_debug_shaders' ).getTranslatedShaderSource( fragmentShader );
+				// }
+			}
+
+			var squareVertexPositionBuffer;
+
+			// This is a simple quad
+			function initBuffers() {
+				'use strict';
+				squareVertexPositionBuffer = gl.createBuffer();
+				gl.bindBuffer( gl.ARRAY_BUFFER, squareVertexPositionBuffer );
+				var vertices = [
+					+1.0, +1.0, +0.0,
+					-1.0, +1.0, +0.0,
+					+1.0, -1.0, +0.0,
+					-1.0, -1.0, +0.0,
+				];
+				gl.bufferData( gl.ARRAY_BUFFER, new Float32Array( vertices ), gl.STATIC_DRAW );
+				squareVertexPositionBuffer.itemSize = 3;
+				squareVertexPositionBuffer.numItems = 4;
+			}
+
+			var startTime = Date.now();
+
+			var dragging = false;
+			var mouseDownX;
+			var mouseDownY;
+			var mouseX;
+			var mouseY;
+			var centerX = 154.0383170729562;
+			var centerY = -6.667824181809174;
+			var center2X = 0;
+			var center2Y = 0;
+			var zoom = 2.59;
+
+			function draw() {
+				'use strict';
+				// Set 'time' uniform in seconds
+				var time = Date.now() - startTime;
+				gl.uniform1f( gl.getUniformLocation( shaderProgram, 'time' ), time / 1000 );
+				var w = gl.viewportWidth  * 0.5;
+				var h = gl.viewportHeight * 0.5;
+				gl.uniform2f( gl.getUniformLocation( shaderProgram, 'pixelSize' ), 1.0 / w, 1.0 / h );
+
+				var cx;
+				var cy;
+				if ( dragging ) {
+					cx = ( centerX - ( mouseX - mouseDownX ) * 2 * zoom ) / w;
+					cy = ( centerY + ( mouseY - mouseDownY ) * zoom ) / h;
+				} else {
+					cx = centerX / w;
+					cy = centerY / h;
+				}
+				gl.uniform2f( gl.getUniformLocation( shaderProgram, 'center' ), Math.fround( cx ), Math.fround( cy ) );
+				gl.uniform2f( gl.getUniformLocation( shaderProgram, 'centerD' ), cx - Math.fround( cx ), cy - Math.fround( cy ) );
+
+				gl.uniform1f( gl.getUniformLocation( shaderProgram, 'zoom' ), zoom );
+				gl.uniform1f( gl.getUniformLocation( shaderProgram, 'zoom2' ), zoom );
+				gl.uniform1i( gl.getUniformLocation( shaderProgram, 'Iterations' ), Iterations );
+
+				var c2x;
+				var c2y;
+				if ( dragging ) {
+					c2x = ( center2X - ( mouseX - mouseDownX ) * 2 * zoom ) / w;
+					c2y = ( center2Y + ( mouseY - mouseDownY ) * zoom ) / h;
+				} else {
+					c2x = center2X / w;
+					c2y = center2Y / h;
+				}
+				gl.uniform2f( gl.getUniformLocation( shaderProgram, 'center2' ), c2x, c2y );
+
+				gl.viewport( 0, 0, gl.viewportWidth, gl.viewportHeight );
+				gl.clear( gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+				gl.bindBuffer( gl.ARRAY_BUFFER, squareVertexPositionBuffer );
+				gl.vertexAttribPointer( shaderProgram.vertexPositionAttribute, squareVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0 );
+				gl.drawArrays( gl.TRIANGLE_STRIP, 0, squareVertexPositionBuffer.numItems );
+
+				setTimeout( function writeZoomCenter() {
+					document.getElementById( 'Zoom' ).textContent = '10^' + Math.log( zoom );
+					document.getElementById( 'Center' ).textContent = centerX + ', ' + centerY;
+				}, 0 );
+			}
+
+			// Mouse handling
+
+			function mouseDown( e ) {
+				'use strict';
+				mouseDownX = e.clientX;
+				mouseDownY = e.clientY;
+				dragging = true;
+				dirty = true;
+			}
+
+			function stopDragging() {
+				'use strict';
+				if ( dragging ) {
+					centerX -= ( mouseX - mouseDownX ) * 2 * zoom;
+					centerY += ( mouseY - mouseDownY ) * zoom;
+				}
+				dragging = false;
+				dirty = true;
+			}
+
+			function mouseUp() {
+				'use strict';
+				stopDragging();
+			}
+
+			var zoomFactor = 1.3;
+
+			function mouseWheel( ev ) {
+				'use strict';
+				if ( ev.deltaMode === WheelEvent.DOM_DELTA_PIXEL ) {
+					var factor = Math.pow( zoomFactor, Math.abs( ev.wheelY ) / 50 );
+					if ( ev.wheelY < 0.0 ) {
+						doZoom( factor );
+					}
+					if ( ev.wheelY > 0.0 ) {
+						doZoom( 1 / factor );
+					}
+				} else {
+					if ( ev.wheelY < 0.0 ) {
+						doZoom( zoomFactor );
+					}
+					if ( ev.wheelY > 0.0 ) {
+						doZoom( 1 / zoomFactor );
+					}
+				}
+
+				ev.preventDefault();
+				dirty = true;
+			}
+
+			function mouseMove( e ) {
+				'use strict';
+				mouseX = e.clientX;
+				mouseY = e.clientY;
+				dirty = dirty || dragging;
+			}
+
+			// Keyboard handling
+
+			var keyUp = false;
+			var keyDown = false;
+			var keyLeft = false;
+			var keyRight = false;
+			var keyZoomIn = false;
+			var keyZoomOut = false;
+
+			function toggleStatus( keyCode, value ) {
+				'use strict';
+				var handled = true;
+				switch ( keyCode ) {
+					case 38: keyUp = value; break;
+					case 40: keyDown = value; break;
+					case 37: keyLeft = value; break;
+					case 39: keyRight = value; break;
+					case 87: keyZoomIn = value; break;
+					case 83: keyZoomOut = value; break;
+					default: handled = false; break;
+				}
+				return handled;
+			}
+
+			function doZoom( factor ) {
+				'use strict';
+				zoom *= factor;
+			}
+
+			var zoomFactorPerSecond = 100;
+
+			function checkKeys( time ) {
+				'use strict';
+				if ( keyDown || keyUp || keyLeft || keyRight || keyZoomIn || keyZoomOut ) {
+					dirty = true;
+				}
+				var factor = Math.pow( zoomFactorPerSecond, time / 1000 );
+				if ( keyZoomIn ) {
+					doZoom( 1 / factor );
+				}
+				if ( keyZoomOut ) {
+					doZoom( factor );
+				}
+				var amount = time * zoom;
+				if ( keyDown ) {
+					centerY -= amount / 2;
+				}
+				if ( keyUp ) {
+					centerY += amount / 2;
+				}
+				if ( keyLeft ) {
+					centerX -= amount;
+				}
+				if ( keyRight ) {
+					centerX += amount;
+				}
+			}
+
+			function webGLStart() {
+				'use strict';
+				var canvas = document.getElementById( 'c' );
+
+				try {
+					gl = canvas.getContext( 'experimental-webgl', { antialias: false, depth: false, alpha: false } );
+					gl.viewportWidth  = canvas.width;
+					gl.viewportHeight = canvas.height;
+				} catch ( e ) {
+					// Ignore
+				}
+				if ( ! gl ) {
+					alert( 'Could not initialise WebGL.' );
+				}
+
+				initShaders();
+				initBuffers();
+				gl.clearColor( 0.0, 0.0, 0.0, 1.0 );
+				requestAnimationFrame( animate );
+				canvas.addEventListener( 'mousedown', mouseDown );
+				canvas.addEventListener( 'mouseup', mouseUp );
+				canvas.addEventListener( 'mouseout', mouseUp ); // check if dragging outside window.
+				canvas.addEventListener( 'mousemove', mouseMove );
+				canvas.addEventListener( 'wheel', mouseWheel );
+
+				canvas.addEventListener( 'keydown', function documentKeydown( event ) {
+					return toggleStatus( event.keyCode, true );
+				} );
+				canvas.addEventListener( 'keyup', function documentKeyup( event ) {
+					return toggleStatus( event.keyCode, false );
+				} );
+
+				var debug = document.getElementById( 'Debug' );
+				var a = gl.getShaderPrecisionFormat( gl.FRAGMENT_SHADER, gl.LOW_FLOAT );
+				debug.appendChild( document.createTextNode( 'FRAGMENT_LOW_FLOAT>> rangeMin:' + a.rangeMin + ' rangeMax: ' + a.rangeMax + ' precision: ' + a.precision ) );
+				debug.appendChild( document.createElement( 'br' ) );
+				a = gl.getShaderPrecisionFormat( gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT );
+				debug.appendChild( document.createTextNode( 'FRAGMENT_MEDIUM_FLOAT>> rangeMin:' + a.rangeMin + ' rangeMax: ' + a.rangeMax + ' precision: ' + a.precision ) );
+				debug.appendChild( document.createElement( 'br' ) );
+				a = gl.getShaderPrecisionFormat( gl.FRAGMENT_SHADER, gl.HIGH_FLOAT );
+				debug.appendChild( document.createTextNode( 'FRAGMENT_HIGH_FLOAT>> rangeMin:' + a.rangeMin + ' rangeMax: ' + a.rangeMax + ' precision: ' + a.precision ) );
+				debug.appendChild( document.createElement( 'br' ) );
+			}
+
+			// UI stuff
+
+			function UILoad() {
+				'use strict';
+				var slider = document.getElementById( 'slider' );
+				var IterationsLabel = document.getElementById( 'IterationsLabel' );
+				slider.addEventListener( 'input', function sliderInput() {
+					IterationsLabel.textContent = String( slider.value );
+					Iterations = slider.value;
+				} );
+				slider.value = Iterations;
+				IterationsLabel.textContent = String( slider.value );
+
+				var aaslider = document.getElementById( 'aaslider' );
+				var AntiAliasLabel = document.getElementById( 'AntiAliasLabel' );
+				aaslider.addEventListener( 'input', function aasliderInput() {
+					AntiAliasLabel.textContent = aaslider.value + 'x' + aaslider.value;
+					AA = aaslider.value;
+				} );
+				aaslider.value = AA;
+				AntiAliasLabel.textContent = aaslider.value + 'x' + aaslider.value;
+				document.getElementById( 'rebuildShader' ).addEventListener( 'click', function rebuildShaderClick() {
+					initShaders();
+					dirty = true;
+				} );
+			}
+		</script>
+	</head>
+	<body onload="UILoad();webGLStart();">
+		<div>
+			<div style="clear: both;">
+				<canvas id="c" tabindex="0" style="border: none;" width="1000" height="500"></canvas>
+			</div>
+			<div style="float: left;">
+				<div style="margin: 3px; padding: 3px; width: 550px; ">
+					<div style="float: left;">
+						Iterations:
+						<span id="IterationsLabel" style="border:0; color:#f6931f; font-weight:bold;">--</span>
+					</div>
+					<input id="slider" type="range" min="1" value="200" max="1500" style="margin: 3px; margin-left: 20px; float:left; width: 400px; "/>
+					<div style="margin: 3px; clear: both; "></div>
+				</div>
+				<div style="float:left; margin: 3px; padding: 3px; width: 550px; ">
+					<div style="float: left;">
+						Samples:
+						<span id="AntiAliasLabel" style="border:0; color:#f6931f; font-weight:bold;">1x1</span>
+					</div>
+					<input id="aaslider" type="range" min="1" value="1" max="4" style="margin: 3px; margin-left: 20px; float:left; width: 400px; "/>
+					<div style="margin: 3px; clear: both; "></div>
+				</div>
+				<div style="margin: 3px; clear: both; "></div>
+			</div>
+			<div style="float: left;">
+				<button id="rebuildShader" style="margin: 7px; height: 55px;">Rebuild shader</button>
+			</div>
+			<div style="margin: 3px; clear: both; "></div>
+			<p style="margin: 6px;">Use arrow keys or mouse drag to pan. Use W/S or mouse wheel to zoom.</p>
+			<p>Zoom:<span id="Zoom" style="border:0; color:#f6931f; font-weight:bold;">--</span></p>
+			<p>Center:<span id="Center" style="border:0; color:#f6931f; font-weight:bold;">--</span></p>
+			<pre id="Debug"></pre>
+			<pre id="src"></pre>
+		</div>
+	</body>
+</html>
