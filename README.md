@@ -6,5 +6,5 @@
 
 ## WebGL
 
-* [Cel Shaded Trefoil Knot](https://federkem.github.io/Demos/WebGL/Demo - WebGL - Cel Shaded Trefoil Knot.html)
-* [Double Precision](https://federkem.github.io/Demos/WebGL/Demo - WebGL - Double Precision.html)
+* [Cel Shaded Trefoil Knot](https://federkem.github.io/Demos/WebGL/Demo%20-%20WebGL%20-%20Cel%20Shaded%20Trefoil%20Knot.html)
+* [Double Precision](https://federkem.github.io/Demos/WebGL/Demo%20-%20WebGL%20-%20Double%20Precision.html)
