@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8">
+		<title>Generators</title>
+		<link rel="canonical" href="https://www.shadertoy.com/view/Xtf3Rn">
+		<style>
+			html,
+			body,
+			canvas {
+				margin: 0;
+				padding: 0;
+				overflow: hidden;
+			}
+		</style>
+	</head>
+	<body>
+		<script>
+			var vertexShaderSrc = `
+				attribute vec3 position;
+
+				void main() {
+					gl_Position = vec4( position, 1.0 );
+				}
+			`;
+
+			var fragmentShaderSrc = `
+				precision highp float;
+
+				uniform vec2 resolution;
+				uniform vec3 mouse;
+				uniform float time;
+
+				// "GENERATORS REDUX" by Kali
+
+				// Same fractal as "Ancient Temple" + rotations, improved shading
+				// (better coloring, AO and shadows), some lighting effects, and a path for the camera
+				// following a liquid metal ball.
+
+				#define ENABLE_HARD_SHADOWS // turn off to enable faster AO soft shadows
+				//#define ENABLE_VIBRATION
+				#define ENABLE_POSTPROCESS // Works better on window view rather than full screen
+
+				#define RAY_STEPS 70
+				#define SHADOW_STEPS 50
+				#define LIGHT_COLOR vec3( 0.85, 0.9, 1.0 )
+				#define AMBIENT_COLOR vec3( 0.8, 0.83, 1.0 )
+				#define FLOOR_COLOR vec3( 1.0, 0.7, 0.9 )
+				#define ENERGY_COLOR vec3( 1.0, 0.7, 0.4 )
+				#define BRIGHTNESS 0.9
+				#define GAMMA 1.3
+				#define SATURATION 0.85
+
+				#define detail 0.00005
+				#define t time * 0.25
+
+				vec3 lightdir = normalize( vec3( 0.5, -0.3, -1.0 ) );
+				vec3 ambdir = normalize( vec3( 0.0, 0.0, 1.0 ) );
+				const vec3 origin = vec3( 0.0, 3.11, 0.0 );
+				vec3 energy = vec3( 0.01 );
+				#ifdef ENABLE_VIBRATION
+					float vibration = sin( time * 60.0 ) * 0.0013;
+				#else
+					float vibration = 0.0;
+				#endif
+				float det = 0.0;
+				vec3 pth1;
+
+				mat2 rot( float a ) {
+					return mat2( cos( a ), sin( a ), -sin( a ), cos( a ) );
+				}
+
+				vec3 path( float ti ) {
+					return vec3( sin( ti ), 0.3 - sin( ti * 0.632 ) * 0.3, cos( ti * 0.5 ) ) * 0.5;
+				}
+
+				float Sphere( vec3 p, vec3 rd, float r ) { //A RAY TRACED SPHERE
+					float b = dot( -p, rd );
+					float inner = b * b - dot( p, p ) + r * r;
+					if ( inner < 0.0 ) {
+						return -1.0;
+					}
+					return b - sqrt( inner );
+				}
+
+				vec2 de( vec3 pos ) {
+					float hid = 0.0;
+					vec3 tpos = pos;
+					tpos.xz = abs( 0.5 - mod( tpos.xz, 1.0 ) );
+					vec4 p = vec4( tpos, 1.0 );
+					float y = max( 0.0, 0.35 - abs( pos.y - 3.35 ) ) / 0.35;
+					for ( int i = 0; i < 7; i++ ) { //LOWERED THE ITERS
+						p.xyz = abs( p.xyz ) - vec3( -0.02, 1.98, -0.02 );
+						p = p * ( 2.0 + vibration * y ) / clamp( dot( p.xyz, p.xyz ), 0.4, 1.0 ) - vec4( 0.5, 1.0, 0.4, 0.0 );
+						p.xz *= mat2( -0.416, -0.91, 0.91, -0.416 );
+					}
+					float fl = pos.y - 3.013;
+					float fr = ( length( max( abs( p.xyz ) - vec3( 0.1, 5.0, 0.1 ), vec3( 0.0 ) ) ) - 0.05 ) / p.w; //RETURN A RRECT
+					// float fr = length( p.xyz ) / p.w;
+					float d = min( fl, fr );
+					d = min( d, -pos.y + 3.95 );
+					if ( abs( d - fl ) < 0.001 ) {
+						hid = 1.0;
+					}
+					return vec2( d, hid );
+				}
+
+				vec3 normal( vec3 p ) {
+					vec3 e = vec3( 0.0, det, 0.0 );
+
+					return normalize( vec3(
+						de( p + e.yxx ).x - de( p - e.yxx ).x,
+						de( p + e.xyx ).x - de( p - e.xyx ).x,
+						de( p + e.xxy ).x - de( p - e.xxy ).x
+					) );
+				}
+
+				float shadow( vec3 pos, vec3 sdir ) { //THIS ONLY RUNS WHEN WITH HARD SHADOWS
+					float sh = 1.0;
+					float totdist = 2.0 * det;
+					float dist = 10.0;
+					float t1 = Sphere( ( pos - 0.005 * sdir ) - pth1, -sdir, 0.015 );
+					if ( t1 > 0.0 && t1 < 0.5 ) {
+						vec3 sphglowNorm = normalize( pos - t1 * sdir - pth1 );
+						sh = 1.0 - pow( max( 0.0, dot( sphglowNorm, sdir ) ) * 1.2, 3.0 );
+					}
+					for ( int steps = 0; steps < SHADOW_STEPS; steps++ ) {
+						if ( totdist < 0.6 && dist > detail ) {
+							vec3 p = pos - totdist * sdir;
+							dist = de( p ).x;
+							sh = min( sh, max( 50.0 * dist / totdist, 0.0 ) );
+							totdist += max( 0.01, dist );
+						}
+					}
+
+					return clamp( sh, 0.1, 1.0 );
+				}
+
+				float calcAO( const vec3 pos, const vec3 nor ) {
+					float aodet = detail * 40.0;
+					float totao = 0.0;
+					float sca = 14.0;
+					for ( int aoi = 0; aoi < 5; aoi++ ) {
+						float hr = aodet * float( aoi * aoi );
+						vec3 aopos = nor * hr + pos;
+						float dd = de( aopos ).x;
+						totao += -( dd - hr ) * sca;
+						sca *= 0.7;
+					}
+					return clamp( 1.0 - 5.0 * totao, 0.0, 1.0 );
+				}
+
+				float _texture( vec3 p ) {
+					p = abs( 0.5 - fract( p * 10.0 ) );
+					vec3 c = vec3( 3.0 );
+					float es = 0.0;
+					float l = 0.0;
+					for ( int i = 0; i < 10; i++ ) {
+						p = abs( p + c ) - abs( p - c ) - p;
+						p /= clamp( dot( p, p ), 0.0, 1.0 );
+						p = p * -1.5 + c;
+						if ( mod( float( i ), 2.0 ) < 1.0 ) {
+							float pl = l;
+							l = length( p );
+							es += exp( -1.0 / abs( l - pl ) );
+						}
+					}
+					return es;
+				}
+
+				vec3 light( in vec3 p, in vec3 dir, in vec3 n, in float hid ) { //PASSING IN THE NORMAL
+					#ifdef ENABLE_HARD_SHADOWS
+						float sh = shadow( p, lightdir );
+					#else
+						float sh = calcAO( p, -2.5 * lightdir ); //USING AO TO MAKE VERY SOFT SHADOWS
+					#endif
+					float ao = calcAO( p, n );
+					float diff = max( 0.0, dot( lightdir, -n ) ) * sh;
+					float y = 3.35 - p.y;
+					vec3 amb = max( 0.5, dot( dir, -n ) ) * 0.5 * AMBIENT_COLOR;
+					if ( hid < 0.5 ) {
+						amb += max( 0.2, dot( vec3( 0.0, 1.0, 0.0 ), -n ) ) * FLOOR_COLOR * pow( max( 0.0, 0.2 - abs( 3.0 - p.y ) ) / 0.2, 1.5 ) * 2.0;
+						amb += energy * pow( max( 0.0, 0.4 - abs( y ) ) / 0.4, 2.0 ) * max( 0.2, dot( vec3( 0.0, -sign( y ), 0.0 ), -n ) ) * 2.0;
+					}
+					vec3 r = reflect( lightdir, n );
+					float spec = pow( max( 0.0, dot( dir, -r ) ) * sh, 10.0 );
+					vec3 col;
+					float energysource = pow( max( 0.0, 0.04 - abs( y ) ) / 0.04, 4.0 ) * 2.0;
+					if ( hid > 1.5 ) {
+						col = vec3( 1.0 );
+						spec = spec * spec;
+					} else {
+						float k = _texture( p ) * 0.23 + 0.2;
+						k = min( k, 1.5 - energysource );
+						col = mix( vec3( k, k * k, k * k * k ), vec3( k ), 0.3 );
+						if ( abs( hid - 1.0 ) < 0.001 ) {
+							col *= FLOOR_COLOR * 1.3;
+						}
+					}
+					col = col * ( amb + diff * LIGHT_COLOR ) + spec * LIGHT_COLOR;
+					if ( hid < 0.5 ) {
+						col = max( col, energy * 2.0 * energysource );
+					}
+					col *= min( 1.0, ao + length( energy ) * 0.5 * max( 0.0, 0.1 - abs( y ) ) / 0.1 );
+					return col;
+				}
+
+				vec3 raymarch( in vec3 from, in vec3 dir ) {
+					float ey = mod( t * 0.5, 1.0 );
+					float glow = 0.0;
+					float eglow = 0.0;
+					float ref = 0.0;
+					float sphdist = 0.0;
+					float totdist = 0.0;
+					vec2 d = vec2( 1.0, 0.0 );
+					vec3 p;
+					vec3 col = vec3( 0.0 );
+					vec3 origdir = dir;
+					vec3 origfrom = from;
+					vec3 sphNorm;
+
+					// FAKING THE SQUISHY BALL BY MOVING A RAY TRACED BALL
+					vec3 wob = cos( dir * 500.0 * length( from - pth1 ) + ( from - pth1 ) * 250.0 + time * 10.0 ) * 0.0005;
+					float t1 = Sphere( from - pth1 + wob, dir, 0.015 );
+					float tg = Sphere( from - pth1 + wob, dir, 0.02 );
+					if ( t1 > 0.0 ) {
+						ref = 1.0;
+						from += t1 * dir;
+						sphdist = t1;
+						sphNorm = normalize( from - pth1 + wob );
+						dir = reflect( dir, sphNorm );
+					} else if ( tg > 0.0 ) {
+						vec3 sphglowNorm = normalize( from + tg * dir - pth1 + wob );
+						glow += pow( max( 0.0, dot( sphglowNorm, -dir ) ), 5.0 );
+					};
+
+					for ( int i = 0; i < RAY_STEPS; i++ ) {
+						if ( d.x > det && totdist < 3.0 ) {
+							p = from + totdist * dir;
+							d = de( p );
+							det = detail * ( 1.0 + totdist * 60.0 ) * ( 1.0 + ref * 5.0 );
+							totdist += d.x;
+							energy = ENERGY_COLOR * ( 1.5 + sin( time * 20.0 + p.z * 10.0 ) ) * 0.25;
+							if ( d.x < 0.015 ) {
+								glow += max( 0.0, 0.015 - d.x ) * exp( -totdist );
+							}
+							if ( d.y < 0.5 && d.x < 0.03 ) { //ONLY DOING THE GLOW WHEN IT IS CLOSE ENOUGH
+								float glw = min( abs( 3.35 - p.y - ey ), abs( 3.35 - p.y + ey ) ); // 2 glows at once
+								eglow += max( 0.0, 0.03 - d.x ) / 0.03 * ( pow( max( 0.0, 0.05 - glw ) / 0.05, 5.0 ) + pow( max( 0.0, 0.15 - abs( 3.35 - p.y ) ) / 0.15, 8.0 ) ) * 1.5;
+							}
+						}
+					}
+					float l = pow( max( 0.0, dot( normalize( -dir.xz ), normalize( lightdir.xz ) ) ), 2.0 );
+					l *= max( 0.2, dot( -dir, lightdir ) );
+					vec3 backg = 0.5 * ( 1.2 - l ) + LIGHT_COLOR * l * 0.7;
+					backg *= AMBIENT_COLOR;
+					if ( d.x <= det ) {
+						vec3 norm = normal( p - abs( d.x - det ) * dir ); // DO THE NORMAL CALC OUTSIDE OF LIGHTING ( since we already have the sphere normal )
+						col = light( p - abs( d.x - det ) * dir, dir, norm, d.y ) * exp( -0.2 * totdist * totdist );
+						col = mix( col, backg, 1.0 - exp( -1.0 * pow( totdist, 1.5 ) ) );
+					} else {
+						col = backg;
+					}
+					vec3 lglow = LIGHT_COLOR * pow( l, 30.0 ) * 0.5;
+					col += glow * ( backg + lglow ) * 1.3;
+					col += pow( eglow, 2.0 ) * energy * 0.015;
+					col += lglow * min( 1.0, totdist * totdist * 0.3 );
+					if ( ref > 0.5 ) {
+						vec3 sphlight = light( origfrom + sphdist * origdir, origdir, sphNorm, 2.0 );
+						col = mix( col * 0.3 + sphlight * 0.7, backg, 1.0 - exp( -1.0 * pow( sphdist, 1.5 ) ) );
+					}
+					return col;
+				}
+
+				vec3 move( inout mat2 rotview1, inout mat2 rotview2 ) {
+					vec3 go = path( t );
+					vec3 adv = path( t + 0.7 );
+					vec3 advec = normalize( adv - go );
+					float an = atan( advec.x, advec.z );
+					rotview1 = mat2( cos( an ), sin( an ), -sin( an ), cos( an ) );
+					an = advec.y * 1.7;
+					rotview2 = mat2( cos( an ), sin( an ), -sin( an ), cos( an ) );
+					return go;
+				}
+
+				void main() {
+					pth1 = path( t + 0.3 ) + origin + vec3( 0.0, 0.01, 0.0 );
+					vec2 uv = gl_FragCoord.xy / resolution.xy * 2.0 - 1.0;
+					vec2 uv2 = uv;
+					#ifdef ENABLE_POSTPROCESS
+						uv *= 1.0 + pow( length( uv2 * uv2 * uv2 * uv2 ), 4.0 ) * 0.07;
+					#endif
+					uv.y *= resolution.y / resolution.x;
+					vec2 mouse2;
+					if ( mouse.z < 1.0 ) {
+						mouse2 = vec2( 0.0 );
+					} else {
+						mouse2 = ( mouse.xy / resolution.xy - 0.5 ) * 3.0;
+					}
+					mat2 rotview1;
+					mat2 rotview2;
+					vec3 from = origin + move( rotview1, rotview2 );
+					vec3 dir = normalize( vec3( uv * 0.8, 1.0 ) );
+					dir.yz *= rot( mouse2.y );
+					dir.xz *= rot( mouse2.x );
+					dir.yz *= rotview2;
+					dir.xz *= rotview1;
+					vec3 color = raymarch( from, dir );
+					color = clamp( color, vec3( 0.0 ), vec3( 1.0 ) );
+					color = pow( color, vec3( GAMMA ) ) * BRIGHTNESS;
+					color = mix( vec3( length( color ) ), color, SATURATION );
+					#ifdef ENABLE_POSTPROCESS
+						vec3 rain = vec3( 0 );
+						color = mix( rain, color, clamp( time * 0.5 - 0.5, 0.0, 1.0 ) );
+						color *= 1.0 - pow( length( uv2 * uv2 * uv2 * uv2 ) * 1.1, 6.0 );
+						uv2.y *= resolution.y / 360.0;
+						color.r *= ( 0.5 + abs( 0.5 - mod( uv2.y,         0.021 ) / 0.021 ) * 0.5 ) * 1.5;
+						color.g *= ( 0.5 + abs( 0.5 - mod( uv2.y + 0.007, 0.021 ) / 0.021 ) * 0.5 ) * 1.5;
+						color.b *= ( 0.5 + abs( 0.5 - mod( uv2.y + 0.014, 0.021 ) / 0.021 ) * 0.5 ) * 1.5;
+						color *= 0.9 + rain * 0.35;
+					#endif
+					gl_FragColor = vec4( color, 1.0 );
+				}
+			`;
+
+			var canvas;
+			var gl;
+
+			var uniformTime;
+			var uniformResolution;
+			var uniformMouse;
+
+			var mouseX = 0.5;
+			var mouseY = 0.5;
+			var mouseButton = 0.0;
+
+			var time = 0;
+			var startTime;
+
+			document.addEventListener( 'DOMContentLoaded', function( event ) {
+
+				// create canvas
+				canvas = document.createElement( 'canvas' );
+				canvas.style.display = 'block';
+				document.body.appendChild( canvas );
+
+				// Initialise WebGL
+				try {
+					gl = canvas.getContext( 'webgl', { preserveDrawingBuffer: true } );
+				} catch( error ) {
+					gl = 0;
+				}
+				if ( ! gl ) {
+					console.error( 'WebGL not supported.' );
+					return;
+				}
+
+				// enable dFdx, dFdy, fwidth
+				gl.getExtension( 'OES_standard_derivatives' );
+
+				// create vertex shader
+				var vertexShader = gl.createShader( gl.VERTEX_SHADER );
+				gl.shaderSource( vertexShader, vertexShaderSrc );
+				gl.compileShader( vertexShader );
+				if ( ! gl.getShaderParameter( vertexShader, gl.COMPILE_STATUS ) ) {
+					console.error( gl.getShaderInfoLog( vertexShader ) );
+					return null;
+				}
+
+				// create fragment shader
+				var fragmentShader = gl.createShader( gl.FRAGMENT_SHADER );
+				gl.shaderSource( fragmentShader, fragmentShaderSrc );
+				gl.compileShader( fragmentShader );
+				if ( ! gl.getShaderParameter( fragmentShader, gl.COMPILE_STATUS ) ) {
+					console.error( gl.getShaderInfoLog( fragmentShader ) );
+					return null;
+				}
+
+				// create program
+				var program = gl.createProgram();
+				gl.attachShader( program, vertexShader );
+				gl.attachShader( program, fragmentShader );
+				gl.linkProgram( program );
+
+				if ( ! gl.getProgramParameter( program, gl.LINK_STATUS ) ) {
+					console.error( gl.getProgramInfoLog( program ) );
+					console.error( 'VALIDATE_STATUS: ' + gl.getProgramParameter( program, gl.VALIDATE_STATUS ), 'ERROR: ' + gl.getError() );
+					return;
+				}
+
+				gl.useProgram( program );
+
+				// create uniforms
+				uniformTime = gl.getUniformLocation( program, 'time' );
+				uniformMouse = gl.getUniformLocation( program, 'mouse' );
+				uniformResolution = gl.getUniformLocation( program, 'resolution' );
+
+				// create buffer
+				var buffer = gl.createBuffer();
+				gl.bindBuffer( gl.ARRAY_BUFFER, buffer );
+				gl.bufferData( gl.ARRAY_BUFFER, new Float32Array( [
+					-1.0, -1.0,
+					 1.0, -1.0,
+					-1.0,  1.0,
+					 1.0, -1.0,
+					 1.0,  1.0,
+					-1.0,  1.0
+				] ), gl.STATIC_DRAW );
+
+				var vertexPosition = gl.getAttribLocation( program, 'position' );
+				gl.enableVertexAttribArray( vertexPosition );
+				gl.vertexAttribPointer( vertexPosition, 2, gl.FLOAT, false, 0, 0 );
+
+				onWindowResize();
+
+				window.addEventListener( 'resize', onWindowResize, false );
+
+				window.addEventListener( 'mousemove', onMouseMove, false );
+
+				startTime = Date.now();
+				render();
+			}, false );
+
+			function onWindowResize( event ) {
+				canvas.width  = window.innerWidth;
+				canvas.height = window.innerHeight;
+
+				canvas.style.width  = canvas.width  + 'px';
+				canvas.style.height = canvas.height + 'px';
+
+				gl.viewport( 0, 0, canvas.width, canvas.height );
+			}
+
+			function onMouseMove( event ) {
+				mouseX = event.clientX;
+				mouseY = window.innerHeight - event.clientY;
+				mouseButton = event.buttons;
+			}
+
+			function render() {
+				requestAnimationFrame( render );
+
+				time = Date.now() - startTime;
+
+				gl.uniform1f( uniformTime, time / 1000 );
+				gl.uniform3f( uniformMouse, mouseX, mouseY, mouseButton );
+				gl.uniform2f( uniformResolution, canvas.width, canvas.height );
+
+				gl.clear( gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+				gl.drawArrays( gl.TRIANGLES, 0, 6 );
+			}
+		</script>
+	</body>
+</html>
